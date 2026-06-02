@@ -179,7 +179,7 @@ def create_admin_router(config: Config, storage: Storage) -> Router:
                     END AS media_type,
                     COALESCE(t.spotify_url, a.spotify_url, ta.source_url, '') AS media_url,
                     'sent' AS status,
-                    CASE WHEN d.source LIKE '%cache%' THEN 'hit' ELSE 'miss' END AS cache_status,
+                    CASE WHEN LOWER(COALESCE(d.source, '')) LIKE '%cache%' THEN 'hit' ELSE 'miss' END AS cache_status,
                     1 AS items_sent,
                     COALESCE(t.title, a.name, d.object_id) AS title,
                     '' AS error_text
@@ -376,7 +376,7 @@ def create_admin_router(config: Config, storage: Storage) -> Router:
                     END AS media_type,
                     COALESCE(t.spotify_url, a.spotify_url, ta.source_url, '') AS media_url,
                     'sent' AS status,
-                    CASE WHEN d.source LIKE '%cache%' THEN 'hit' ELSE 'miss' END AS cache_status,
+                    CASE WHEN LOWER(COALESCE(d.source, '')) LIKE '%cache%' THEN 'hit' ELSE 'miss' END AS cache_status,
                     1 AS items_sent,
                     COALESCE(t.title, a.name, d.object_id) AS title,
                     '' AS error_text
@@ -819,7 +819,7 @@ def create_admin_router(config: Config, storage: Storage) -> Router:
                 u.created_at,
                 u.last_seen,
                 COALESCE(s.successful, 0) AS successful,
-                COALESCE(f.failed, 0) AS failed,
+                COALESCE(c.cache_hits, 0) AS cache_hits,
                 COALESCE(s.successful, 0) + COALESCE(f.failed, 0) AS requests
             FROM users u
             LEFT JOIN (
@@ -827,6 +827,12 @@ def create_admin_router(config: Config, storage: Storage) -> Router:
                 FROM downloads
                 GROUP BY user_id
             ) s ON s.user_id = u.user_id
+            LEFT JOIN (
+                SELECT user_id, COUNT(*) AS cache_hits
+                FROM downloads
+                WHERE LOWER(COALESCE(source, '')) LIKE '%cache%'
+                GROUP BY user_id
+            ) c ON c.user_id = u.user_id
             LEFT JOIN (
                 SELECT user_id, COUNT(*) AS failed
                 FROM failed_downloads
@@ -1115,7 +1121,7 @@ def format_users(rows: list[dict[str, Any]], empty: str) -> str:
                     date_only(row.get("last_seen")),
                     str(int(row.get("requests") or 0)),
                     str(int(row.get("successful") or 0)),
-                    str(int(row.get("failed") or 0)),
+                    str(int(row.get("cache_hits") or 0)),
                 ]
             )
         )

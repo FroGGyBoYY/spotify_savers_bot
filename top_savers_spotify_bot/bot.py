@@ -1231,6 +1231,9 @@ def build_dispatcher(
         cached_audio = await storage.get_track_audio_cache(track.id, track)
         if cached_audio and cached_audio.get("cache_key") and cached_audio.get("file_id"):
             cache_key = str(cached_audio["cache_key"])
+            cached_source = str(cached_audio.get("source") or "track_cache")
+            if "cache" not in cached_source.lower():
+                cached_source = f"track_cache:{cached_source}"
             if not await storage.get_cached_file(cache_key):
                 await storage.save_cached_file(
                     cache_key,
@@ -1246,7 +1249,7 @@ def build_dispatcher(
                 lang,
                 None,
                 cache_key,
-                str(cached_audio.get("source") or "track_cache"),
+                cached_source,
                 include_album=include_album,
             )
             return True
@@ -1452,10 +1455,13 @@ def build_dispatcher(
         include_album: bool = False,
     ) -> None:
         cached_file_id = await storage.get_cached_file(cache_key)
+        history_source = source
+        if cached_file_id and "cache" not in history_source.lower():
+            history_source = f"file_cache:{history_source}"
         caption = track_caption(track, lang, include_album=include_album)
         if cached_file_id:
             sent_message = await bot.send_audio(chat_id, cached_file_id, caption=caption)
-            await storage.mark_track_audio_cached(track, cache_key, cached_file_id, None, source, path)
+            await storage.mark_track_audio_cached(track, cache_key, cached_file_id, None, history_source, path)
         else:
             if path is None:
                 raise RuntimeError("audio path is required when Telegram file_id cache is empty")
@@ -1480,11 +1486,11 @@ def build_dispatcher(
                     cache_key,
                     sent_message.audio.file_id,
                     sent_message.audio.file_unique_id,
-                    source,
+                    history_source,
                     path,
                 )
 
-        count = await storage.record_download(user_id, track.id, source)
+        count = await storage.record_download(user_id, track.id, history_source)
         if await should_show_ad(user_id, count):
             await bot.send_message(chat_id, f"<b>{html.escape(t(lang, 'ad_prefix'))}</b>\n{html.escape(config.ad_text)}")
         if not await storage.is_ad_free_user(user_id):
