@@ -9,7 +9,7 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, ErrorEvent, FSInputFile, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -167,6 +167,53 @@ def build_dispatcher(
 
     def mark_recent_audio_send(key: str) -> None:
         recent_audio_sends[key] = time.time()
+
+    async def telegram_retry_after_sleep(scope: str, error: TelegramRetryAfter) -> None:
+        retry_after = max(1, int(getattr(error, "retry_after", 1) or 1))
+        await storage.log_error("telegram_retry_after", f"{scope}: retry after {retry_after}s")
+        await asyncio.sleep(retry_after + 1)
+
+    async def send_message_with_retry(
+        bot: Bot,
+        chat_id: int,
+        text: str,
+        *,
+        attempts: int = 5,
+        **kwargs,
+    ) -> Message:
+        last_error: TelegramRetryAfter | None = None
+
+        for attempt in range(max(1, attempts)):
+            try:
+                return await bot.send_message(chat_id, text, **kwargs)
+            except TelegramRetryAfter as error:
+                last_error = error
+                if attempt >= attempts - 1:
+                    raise
+                await telegram_retry_after_sleep("send_message", error)
+
+        raise last_error or RuntimeError("send_message failed")
+
+    async def send_audio_with_retry(
+        bot: Bot,
+        chat_id: int,
+        audio,
+        *,
+        attempts: int = 5,
+        **kwargs,
+    ) -> Message:
+        last_error: TelegramRetryAfter | None = None
+
+        for attempt in range(max(1, attempts)):
+            try:
+                return await bot.send_audio(chat_id, audio, **kwargs)
+            except TelegramRetryAfter as error:
+                last_error = error
+                if attempt >= attempts - 1:
+                    raise
+                await telegram_retry_after_sleep("send_audio", error)
+
+        raise last_error or RuntimeError("send_audio failed")
 
     def provider_cache_key(track: SpotifyTrack, source_candidate: dict[str, object]) -> str:
         source = str(source_candidate.get("source") or "youtube_music").strip()
@@ -1081,7 +1128,7 @@ def build_dispatcher(
         collection: SpotifyCollection,
         lang: str,
     ) -> None:
-        await bot.send_message(chat_id, t(lang, "bundle_started", limit=len(collection.tracks)))
+        await send_message_with_retry(bot, chat_id, t(lang, "bundle_started", limit=len(collection.tracks)))
         sent = 0
         for index, track in enumerate(collection.tracks):
             include_album = collection.kind == "album" and index == len(collection.tracks) - 1
@@ -1110,7 +1157,7 @@ def build_dispatcher(
                 continue
             if ok:
                 sent += 1
-        await bot.send_message(chat_id, t(lang, "bundle_done", sent=sent, total=len(collection.tracks)))
+        await send_message_with_retry(bot, chat_id, t(lang, "bundle_done", sent=sent, total=len(collection.tracks)))
 
     async def send_youtube_music_playlist_audio(
         bot: Bot,
@@ -1119,7 +1166,7 @@ def build_dispatcher(
         playlist: YouTubeMusicPlaylist,
         lang: str,
     ) -> None:
-        await bot.send_message(chat_id, t(lang, "bundle_started", limit=len(playlist.tracks)))
+        await send_message_with_retry(bot, chat_id, t(lang, "bundle_started", limit=len(playlist.tracks)))
         sent = 0
         for index, item in enumerate(playlist.tracks):
             track = item.to_spotify_track(playlist.name)
@@ -1149,7 +1196,7 @@ def build_dispatcher(
                 continue
             if ok:
                 sent += 1
-        await bot.send_message(chat_id, t(lang, "bundle_done", sent=sent, total=len(playlist.tracks)))
+        await send_message_with_retry(bot, chat_id, t(lang, "bundle_done", sent=sent, total=len(playlist.tracks)))
 
     async def send_collection_once(
         bot: Bot,
@@ -1460,13 +1507,14 @@ def build_dispatcher(
             history_source = f"file_cache:{history_source}"
         caption = track_caption(track, lang, include_album=include_album)
         if cached_file_id:
-            sent_message = await bot.send_audio(chat_id, cached_file_id, caption=caption)
+            sent_message = await send_audio_with_retry(bot, chat_id, cached_file_id, caption=caption)
             await storage.mark_track_audio_cached(track, cache_key, cached_file_id, None, history_source, path)
         else:
             if path is None:
                 raise RuntimeError("audio path is required when Telegram file_id cache is empty")
             thumbnail = await track_thumbnail(track)
-            sent_message = await bot.send_audio(
+            sent_message = await send_audio_with_retry(
+                bot,
                 chat_id,
                 FSInputFile(path),
                 title=track.name[:64],
